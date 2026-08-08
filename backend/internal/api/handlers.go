@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/anurag46-code/workflow-engine/internal/engine"
@@ -28,6 +29,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/workflows/:id/tasks", h.getWorkflowTasks)
 	r.GET("/workflows/:id/stream", h.streamWorkflow) // SSE endpoint
 	r.POST("/workflows/demo", h.submitDemo)
+	r.POST("/workflows/analyze", h.submitTextAnalysis)
 }
 
 func (h *Handler) submitWorkflow(c *gin.Context) {
@@ -142,9 +144,9 @@ func (h *Handler) submitDemo(c *gin.Context) {
 		Tasks: []models.TaskDef{
 			{
 				ID:   "fetch-data",
-				Type: "http",
+				Type: "wait",
 				Config: map[string]any{
-					"url": "https://httpbin.org/get",
+					"seconds": 2,
 				},
 				MaxRetries: 3,
 			},
@@ -182,6 +184,72 @@ func (h *Handler) submitDemo(c *gin.Context) {
 				DependsOn: []string{"aggregate"},
 				Config:    map[string]any{"seconds": 1},
 				MaxRetries: 1,
+			},
+		},
+	}
+
+	run, err := h.engine.Submit(def)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, run)
+}
+
+// submitTextAnalysis creates a text analysis pipeline with real NLP tasks.
+func (h *Handler) submitTextAnalysis(c *gin.Context) {
+	var body struct {
+		Text  string `json:"text"`
+		Email string `json:"email"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Text) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "text is required"})
+		return
+	}
+	email := body.Email
+	if email == "" {
+		email = "demo@example.com"
+	}
+
+	def := models.WorkflowDef{
+		Name: "Text Analysis Pipeline",
+		Tasks: []models.TaskDef{
+			{
+				ID:         "ingest",
+				Type:       "ingest",
+				Config:     map[string]any{"text": body.Text},
+				MaxRetries: 1,
+			},
+			{
+				ID:         "word-count",
+				Type:       "word_count",
+				DependsOn:  []string{"ingest"},
+				MaxRetries: 2,
+			},
+			{
+				ID:         "extract-keywords",
+				Type:       "extract_keywords",
+				DependsOn:  []string{"ingest"},
+				MaxRetries: 2,
+			},
+			{
+				ID:         "detect-sentiment",
+				Type:       "detect_sentiment",
+				DependsOn:  []string{"ingest"},
+				MaxRetries: 2,
+			},
+			{
+				ID:        "generate-report",
+				Type:      "generate_report",
+				DependsOn: []string{"word-count", "extract-keywords", "detect-sentiment"},
+				MaxRetries: 2,
+			},
+			{
+				ID:        "send-email",
+				Type:      "send_email",
+				DependsOn: []string{"generate-report"},
+				Config:    map[string]any{"to": email},
+				MaxRetries: 2,
 			},
 		},
 	}

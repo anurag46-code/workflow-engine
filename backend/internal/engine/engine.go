@@ -41,6 +41,10 @@ func (e *Engine) Submit(def models.WorkflowDef) (*models.WorkflowRun, error) {
 		if maxRetries == 0 {
 			maxRetries = 3
 		}
+		deps := task.DependsOn
+		if deps == nil {
+			deps = []string{}
+		}
 		t := &models.TaskRun{
 			ID:         uuid.New().String(),
 			WorkflowID: run.ID,
@@ -48,6 +52,7 @@ func (e *Engine) Submit(def models.WorkflowDef) (*models.WorkflowRun, error) {
 			Type:       task.Type,
 			Status:     models.TaskPending,
 			MaxRetries: maxRetries,
+			DependsOn:  deps,
 			Config:     task.Config,
 		}
 		if t.Config == nil {

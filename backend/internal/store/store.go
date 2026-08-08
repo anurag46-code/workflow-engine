@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/anurag46-code/workflow-engine/internal/models"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 )
 
@@ -32,6 +33,31 @@ func New() (*Store, error) {
 
 func (s *Store) Close() { s.db.Close() }
 
+// GetUpstreamOutputs returns taskID->output for all succeeded upstream tasks.
+// Workers use this to pass data between pipeline stages.
+func (s *Store) GetUpstreamOutputs(workflowID string, dependsOn []string) (map[string]string, error) {
+	if len(dependsOn) == 0 {
+		return map[string]string{}, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT task_id, output FROM task_runs
+		WHERE workflow_id=$1 AND task_id=ANY($2) AND status='success'
+	`, workflowID, pq.Array(dependsOn))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]string{}
+	for rows.Next() {
+		var id, out string
+		if err := rows.Scan(&id, &out); err != nil {
+			return nil, err
+		}
+		result[id] = out
+	}
+	return result, nil
+}
+
 func (s *Store) Migrate() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -51,6 +77,7 @@ func (s *Store) Migrate() error {
 			status       TEXT NOT NULL DEFAULT 'pending',
 			retries      INT  NOT NULL DEFAULT 0,
 			max_retries  INT  NOT NULL DEFAULT 3,
+			depends_on   TEXT[] NOT NULL DEFAULT '{}',
 			config       JSONB NOT NULL DEFAULT '{}',
 			output       TEXT NOT NULL DEFAULT '',
 			error        TEXT NOT NULL DEFAULT '',
@@ -110,15 +137,19 @@ func (s *Store) CreateTaskRun(t *models.TaskRun) error {
 	if err != nil {
 		return err
 	}
+	deps := t.DependsOn
+	if deps == nil {
+		deps = []string{}
+	}
 	_, err = s.db.Exec(`
-		INSERT INTO task_runs (id, workflow_id, task_id, type, status, retries, max_retries, config, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-	`, t.ID, t.WorkflowID, t.TaskID, t.Type, t.Status, t.Retries, t.MaxRetries, cfg)
+		INSERT INTO task_runs (id, workflow_id, task_id, type, status, retries, max_retries, depends_on, config, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+	`, t.ID, t.WorkflowID, t.TaskID, t.Type, t.Status, t.Retries, t.MaxRetries, pq.Array(deps), cfg)
 	return err
 }
 
 func (s *Store) GetTaskRunsByWorkflow(workflowID string) ([]*models.TaskRun, error) {
-	rows, err := s.db.Query(`SELECT id, workflow_id, task_id, type, status, retries, max_retries, config, output, error, locked_by, locked_until, created_at, updated_at FROM task_runs WHERE workflow_id=$1`, workflowID)
+	rows, err := s.db.Query(`SELECT id, workflow_id, task_id, type, status, retries, max_retries, depends_on, config, output, error, locked_by, locked_until, created_at, updated_at FROM task_runs WHERE workflow_id=$1`, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +176,24 @@ func (s *Store) ClaimTask(workerID string, leaseDuration time.Duration) (*models
 	}
 	defer tx.Rollback()
 
+	// Only claim a task if every task it depends on has status='success'.
+	// The subquery checks: for each task_id in this task's depends_on array,
+	// there must exist a row in the same workflow with that task_id and status='success'.
+	// If depends_on is empty the NOT EXISTS clause is vacuously false - task is ready.
 	row := tx.QueryRow(`
-		SELECT id, workflow_id, task_id, type, status, retries, max_retries, config, output, error, locked_by, locked_until, created_at, updated_at
-		FROM task_runs
+		SELECT id, workflow_id, task_id, type, status, retries, max_retries, depends_on, config, output, error, locked_by, locked_until, created_at, updated_at
+		FROM task_runs t
 		WHERE status IN ('pending', 'retrying')
 		  AND (locked_until IS NULL OR locked_until < NOW())
+		  AND NOT EXISTS (
+		    SELECT 1 FROM unnest(t.depends_on) AS dep_task_id
+		    WHERE NOT EXISTS (
+		      SELECT 1 FROM task_runs dep
+		      WHERE dep.workflow_id = t.workflow_id
+		        AND dep.task_id = dep_task_id
+		        AND dep.status = 'success'
+		    )
+		  )
 		ORDER BY created_at ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
@@ -188,13 +232,16 @@ func (s *Store) CompleteTask(id, output string) error {
 }
 
 func (s *Store) FailTask(id, errMsg string, retries, maxRetries int) error {
+	newRetries := retries + 1
 	status := "failed"
 	if retries < maxRetries {
 		status = "retrying"
+	} else {
+		newRetries = retries // don't increment past maxRetries
 	}
 	_, err := s.db.Exec(`
 		UPDATE task_runs SET status=$1, error=$2, retries=$3, locked_by='', locked_until=NULL, updated_at=NOW() WHERE id=$4
-	`, status, errMsg, retries+1, id)
+	`, status, errMsg, newRetries, id)
 	return err
 }
 
@@ -220,7 +267,7 @@ func scanWorkflow(s scanner) (*models.WorkflowRun, error) {
 func scanTask(s scanner) (*models.TaskRun, error) {
 	var t models.TaskRun
 	var cfgRaw []byte
-	err := s.Scan(&t.ID, &t.WorkflowID, &t.TaskID, &t.Type, &t.Status, &t.Retries, &t.MaxRetries, &cfgRaw, &t.Output, &t.Error, &t.LockedBy, &t.LockedUntil, &t.CreatedAt, &t.UpdatedAt)
+	err := s.Scan(&t.ID, &t.WorkflowID, &t.TaskID, &t.Type, &t.Status, &t.Retries, &t.MaxRetries, pq.Array(&t.DependsOn), &cfgRaw, &t.Output, &t.Error, &t.LockedBy, &t.LockedUntil, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

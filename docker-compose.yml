@@ -15,15 +15,25 @@ services:
       timeout: 3s
       retries: 5
 
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "8025:8025"  # web UI to view emails
+      - "1025:1025"  # SMTP port
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     environment:
       POSTGRES_DSN: postgres://workflow:workflow@postgres:5432/workflow_engine?sslmode=disable
+      SMTP_HOST: mailhog
+      SMTP_PORT: "1025"
     depends_on:
       postgres:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     ports:
       - "8081:8080"
 

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
-import { WorkflowRun } from './types'
+import { WorkflowRun, WorkflowDef } from './types'
 import { DAGView } from './components/DAGView'
+import { WorkflowBuilder } from './components/WorkflowBuilder'
+import { TextAnalysisLauncher } from './components/TextAnalysisLauncher'
 import { useWorkflowStream } from './hooks/useWorkflowStream'
 
 const API = import.meta.env.DEV ? 'http://localhost:8080' : ''
@@ -16,6 +18,8 @@ export default function App() {
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [selectedID, setSelectedID] = useState<string | null>(null)
   const [launching, setLaunching] = useState(false)
+  const [showBuilder, setShowBuilder] = useState(false)
+  const [showAnalyzer, setShowAnalyzer] = useState(false)
 
   const { workflow, tasks } = useWorkflowStream(selectedID)
 
@@ -46,10 +50,26 @@ export default function App() {
     setLaunching(false)
   }
 
+  async function submitCustom(def: WorkflowDef) {
+    setShowBuilder(false)
+    const res = await fetch(`${API}/workflows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(def),
+    })
+    if (res.ok) {
+      const run: WorkflowRun = await res.json()
+      setRuns(prev => [run, ...prev])
+      setSelectedID(run.id)
+    }
+  }
+
   const displayed = workflow ?? runs.find(r => r.id === selectedID) ?? null
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      {showBuilder && <WorkflowBuilder onSubmit={submitCustom} onCancel={() => setShowBuilder(false)} />}
+      {showAnalyzer && <TextAnalysisLauncher onLaunched={(run) => { setRuns(prev => [run, ...prev]); setSelectedID(run.id); setShowAnalyzer(false) }} onCancel={() => setShowAnalyzer(false)} />}
       {/* Sidebar */}
       <div style={{
         width: 260, flexShrink: 0, background: '#141414', borderRight: '1px solid #222',
@@ -60,18 +80,38 @@ export default function App() {
           <div style={{ fontSize: 11, color: '#666' }}>DAG-based task orchestrator</div>
         </div>
 
-        <div style={{ padding: '10px 14px' }}>
+        <div style={{ padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button
+            onClick={() => setShowAnalyzer(true)}
+            style={{
+              width: '100%', padding: '9px', borderRadius: 6,
+              background: '#2ecc71', border: 'none',
+              color: '#fff', fontSize: 13, cursor: 'pointer', fontWeight: 600,
+            }}
+          >
+            + Analyze Text
+          </button>
           <button
             onClick={launchDemo}
             disabled={launching}
             style={{
               width: '100%', padding: '9px', borderRadius: 6,
-              background: launching ? '#2a2a2a' : '#3498db',
-              border: 'none', color: '#fff', fontSize: 13,
-              cursor: launching ? 'not-allowed' : 'pointer', fontWeight: 500,
+              background: launching ? '#2a2a2a' : 'none',
+              border: '1px solid #333', color: '#aaa', fontSize: 13,
+              cursor: launching ? 'not-allowed' : 'pointer',
             }}
           >
-            {launching ? 'Launching...' : '+ Run Demo Workflow'}
+            {launching ? 'Launching...' : 'Run Demo'}
+          </button>
+          <button
+            onClick={() => setShowBuilder(true)}
+            style={{
+              width: '100%', padding: '9px', borderRadius: 6,
+              background: 'none', border: '1px solid #2a2a2a',
+              color: '#666', fontSize: 12, cursor: 'pointer',
+            }}
+          >
+            Custom Workflow
           </button>
         </div>
 
