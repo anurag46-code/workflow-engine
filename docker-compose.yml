@@ -20,13 +20,11 @@ services:
     image: mailhog/mailhog
     restart: unless-stopped
     ports:
-      - "8025:8025"  # web UI to view emails
-      - "1025:1025"  # SMTP port
+      - "8025:8025"
+      - "1025:1025"
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: anurag1426/workflow-engine-backend:latest
     restart: unless-stopped
     environment:
       POSTGRES_DSN: postgres://workflow:workflow@postgres:5432/workflow_engine?sslmode=disable
@@ -41,9 +39,7 @@ services:
       - "8081:8080"
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: anurag1426/workflow-engine-frontend:latest
     restart: unless-stopped
     ports:
       - "3001:80"
